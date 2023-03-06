@@ -1,0 +1,55 @@
+stages:
+  - build
+  - publish
+  - deploy
+
+variables:
+  # Set the project namespace and artifact name
+  PROJECT_NAMESPACE: my-namespace
+  ARTIFACT_NAME: my-app
+
+  # Set the JFrog Artifactory credentials
+  ARTIFACTORY_URL: https://my-artifactory-instance.com
+  ARTIFACTORY_USER: my-artifactory-user
+  ARTIFACTORY_PASSWORD: $ARTIFACTORY_PASSWORD # Add this as a secret variable in GitLab
+
+  # Set the target server details
+  TARGET_SERVER: my-target-server
+  TARGET_SERVER_USER: my-target-server-user
+  TARGET_SERVER_PASSWORD: $TARGET_SERVER_PASSWORD # Add this as a secret variable in GitLab
+  IIS_SITE: MySite
+  IIS_PATH: MySitePath
+
+build:
+  stage: build
+  image: mcr.microsoft.com/dotnet/sdk:5.0
+  script:
+    - dotnet build
+  artifacts:
+    paths:
+      - bin/Release/net5.0/publish/
+
+publish:
+  stage: publish
+  image: docker.io/jfrog/jfrog-cli:latest
+  script:
+    - jfrog rt config --url $ARTIFACTORY_URL --user $ARTIFACTORY_USER --password $ARTIFACTORY_PASSWORD
+    - jfrog rt upload bin/Release/net5.0/publish/* "my-local-repo/$PROJECT_NAMESPACE/$ARTIFACT_NAME/"
+  dependencies:
+    - build
+
+deploy:
+  stage: deploy
+  image: docker.io/microsoft/powershell:latest
+  script:
+    - pwsh -Command "Invoke-WebRequest -Uri '$ARTIFACTORY_URL/api/storage/my-local-repo/$PROJECT_NAMESPACE/$ARTIFACT_NAME/' -Headers @{Authorization='Bearer '+(jfrog rt curl --url '$ARTIFACTORY_URL/artifactory/api/security/token' --user '$ARTIFACTORY_USER:$ARTIFACTORY_PASSWORD' --silent --request POST | ConvertFrom-Json).access_token} -OutFile artifact.json"
+    - $path = (ConvertFrom-Json (Get-Content -Raw artifact.json)).repoPath
+    - $filename = $path.Split('/')[-1]
+    - jfrog rt download "my-local-repo/$path" --flat
+    - Expand-Archive -Path $filename -DestinationPath .
+    - $site = Get-IISSite -Name $IIS_SITE
+    - $app = New-IISSiteApplication -Site $site -Path $IIS_PATH -PhysicalPath $(Resolve-Path .)
+  dependencies:
+    - publish
+  only:
+    - master
